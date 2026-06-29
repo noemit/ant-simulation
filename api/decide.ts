@@ -43,6 +43,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   try {
     const decisions = await client.decideBatch(ants as AntDecisionInput[]);
+
+    // Refuse to return a partial batch. If the LLM skipped any ant, treat it
+    // as a failure so the client can decide how to handle it.
+    const decisionIds = new Set(decisions.map((d) => d.antId));
+    if (decisions.length !== ants.length || ants.some((a) => !decisionIds.has(a.ant_id))) {
+      throw new Error(
+        `LLM returned incomplete decisions: ${decisions.length}/${ants.length} ants`
+      );
+    }
+
     res.status(200).json({ decisions });
   } catch (err) {
     console.error('[api/decide] LLM error:', err);
