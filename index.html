@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Army Ant Simulation</title>
+    <style>
+      body {
+        margin: 0;
+        background: #0a0a0a;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+      }
+      #stats {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        color: #00ff88;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 12px;
+        pointer-events: none;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+      }
+      #restart {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        padding: 6px 12px;
+        background: rgba(20, 20, 20, 0.8);
+        border: 1px solid #00ff88;
+        color: #00ff88;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 12px;
+        cursor: pointer;
+        border-radius: 4px;
+      }
+      #restart:hover {
+        background: rgba(0, 255, 136, 0.15);
+      }
+      #restart:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      #snapshot-toggle {
+        position: fixed;
+        top: 8px;
+        right: 80px;
+        padding: 6px 12px;
+        background: rgba(20, 20, 20, 0.8);
+        border: 1px solid #00ff88;
+        color: #00ff88;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 12px;
+        cursor: pointer;
+        border-radius: 4px;
+      }
+      #snapshot-toggle:hover {
+        background: rgba(0, 255, 136, 0.15);
+      }
+      #snapshot-toggle:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      #edit-prompt {
+        position: fixed;
+        top: 40px;
+        right: 8px;
+        padding: 6px 12px;
+        background: rgba(20, 20, 20, 0.8);
+        border: 1px solid #00ff88;
+        color: #00ff88;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 12px;
+        cursor: pointer;
+        border-radius: 4px;
+      }
+      #edit-prompt:hover {
+        background: rgba(0, 255, 136, 0.15);
+      }
+      #edit-prompt:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      #prompt-modal {
+        display: none;
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 640px;
+        max-width: 92vw;
+        max-height: 85vh;
+        overflow-y: auto;
+        background: rgba(12, 12, 12, 0.98);
+        border: 1px solid #00ff88;
+        border-radius: 6px;
+        padding: 16px;
+        color: #00ff88;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 12px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.8);
+        z-index: 100;
+      }
+      #prompt-modal h3 {
+        margin: 0 0 12px 0;
+        font-size: 14px;
+        color: #fff;
+      }
+      #prompt-modal .close {
+        position: absolute;
+        top: 8px;
+        right: 12px;
+        color: #00ff88;
+        cursor: pointer;
+        font-size: 16px;
+      }
+      #prompt-modal label {
+        display: block;
+        margin-bottom: 4px;
+        color: #88ffcc;
+      }
+      #prompt-editor {
+        width: 100%;
+        height: 320px;
+        background: #080808;
+        border: 1px solid rgba(0, 255, 136, 0.3);
+        color: #00ff88;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 11px;
+        padding: 8px;
+        box-sizing: border-box;
+        resize: vertical;
+      }
+      #prompt-modal .senses {
+        margin: 12px 0;
+      }
+      #prompt-modal .senses label {
+        display: inline-block;
+        margin-right: 16px;
+        color: #00ff88;
+        cursor: pointer;
+      }
+      #prompt-modal .senses input {
+        margin-right: 4px;
+      }
+      #prompt-modal .actions {
+        margin-top: 12px;
+        text-align: right;
+      }
+      #prompt-modal .actions button {
+        padding: 6px 12px;
+        background: rgba(20, 20, 20, 0.8);
+        border: 1px solid #00ff88;
+        color: #00ff88;
+        font-family: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        border-radius: 4px;
+        margin-left: 8px;
+      }
+      #prompt-modal .actions button:hover {
+        background: rgba(0, 255, 136, 0.15);
+      }
+      #legend {
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        color: #00ff88;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 11px;
+        background: rgba(10, 10, 10, 0.7);
+        padding: 8px 10px;
+        border-radius: 4px;
+        pointer-events: none;
+      }
+      #legend .row {
+        display: flex;
+        align-items: center;
+        margin: 2px 0;
+      }
+      #legend .swatch {
+        width: 12px;
+        height: 12px;
+        margin-right: 8px;
+        border-radius: 2px;
+      }
+      #ant-modal {
+        display: none;
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 420px;
+        max-width: 90vw;
+        max-height: 85vh;
+        overflow-y: auto;
+        background: rgba(12, 12, 12, 0.96);
+        border: 1px solid #00ff88;
+        border-radius: 6px;
+        padding: 16px;
+        color: #00ff88;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 12px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.8);
+        z-index: 100;
+      }
+      #ant-modal h3 {
+        margin: 0 0 10px 0;
+        font-size: 14px;
+        color: #fff;
+      }
+      #ant-modal .close {
+        position: absolute;
+        top: 8px;
+        right: 12px;
+        color: #00ff88;
+        cursor: pointer;
+        font-size: 16px;
+      }
+      #ant-modal .section {
+        margin-top: 12px;
+      }
+      #ant-modal .section-title {
+        font-weight: bold;
+        margin-bottom: 4px;
+        color: #88ffcc;
+      }
+      #ant-modal table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      #ant-modal th,
+      #ant-modal td {
+        text-align: left;
+        padding: 3px 6px;
+        border-bottom: 1px solid rgba(0, 255, 136, 0.15);
+      }
+      #ant-modal th {
+        color: #88ffcc;
+      }
+      #ant-modal td.num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      #ant-modal .badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 3px;
+        margin-right: 4px;
+        background: rgba(0, 255, 136, 0.15);
+        border: 1px solid rgba(0, 255, 136, 0.4);
+      }
+      #ant-modal canvas {
+        display: block;
+        width: 100%;
+        height: 180px;
+        background: #080808;
+        border: 1px solid rgba(0, 255, 136, 0.2);
+        margin-top: 6px;
+      }
+      #trail-tooltip {
+        display: none;
+        position: absolute;
+        padding: 4px 8px;
+        background: rgba(0, 0, 0, 0.85);
+        color: #00ff88;
+        border: 1px solid rgba(0, 255, 136, 0.4);
+        border-radius: 4px;
+        font-size: 11px;
+        pointer-events: none;
+        white-space: nowrap;
+        z-index: 200;
+      }
+      #modal-backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 99;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="sim"></canvas>
+    <div id="stats">Loading...</div>
+    <button id="snapshot-toggle" title="Force the server pheromone snapshot overlay" disabled>Use snapshot</button>
+    <button id="restart" disabled>Restart</button>
+    <button id="edit-prompt" disabled>Edit system prompt</button>
+    <div id="legend">
+      <div class="row"><span class="swatch" style="background:#ff5724"></span>raid trail (carriers/explorers)</div>
+      <div class="row"><span class="swatch" style="background:#ff2a55"></span>alarm (ants near hazard / bridges)</div>
+      <div class="row"><span class="swatch" style="background:#2a73ff"></span>nest / queen (bivouac)</div>
+      <div class="row"><span class="swatch" style="background:#fff23a"></span>prey / food (environmental)</div>
+      <div class="row"><span class="swatch" style="background:#91ff2a"></span>toxin / hazard (environmental)</div>
+    </div>
+
+    <div id="modal-backdrop"></div>
+    <div id="ant-modal">
+      <span class="close" id="ant-modal-close">&times;</span>
+      <h3 id="ant-modal-title">Ant details</h3>
+      <div id="ant-modal-badges"></div>
+
+      <div class="section">
+        <div class="section-title">Senses (this tick)</div>
+        <table id="ant-modal-senses">
+          <thead><tr><th>Chemical</th><th>Smell point</th><th>Strength</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="ant-modal-nearest-food"></div>
+      </div>
+
+      <div class="section" style="position:relative">
+        <div class="section-title">Movement trail (last 120 ticks)</div>
+        <canvas id="ant-modal-trail" width="380" height="180"></canvas>
+        <div id="trail-tooltip"></div>
+      </div>
+    </div>
+
+    <div id="prompt-modal">
+      <span class="close" id="prompt-modal-close">&times;</span>
+      <h3>Edit system prompt</h3>
+      <label for="prompt-editor">System prompt</label>
+      <textarea id="prompt-editor"></textarea>
+      <div class="senses">
+        <span style="color:#88ffcc;margin-right:8px">Senses sent to ants:</span>
+        <label><input type="checkbox" class="sense-checkbox" value="raid_trail" checked> raid_trail</label>
+        <label><input type="checkbox" class="sense-checkbox" value="food_trail" checked> food_trail</label>
+        <label><input type="checkbox" class="sense-checkbox" value="toxin_scent" checked> toxin_scent</label>
+      </div>
+      <div class="actions">
+        <button id="prompt-modal-cancel">Cancel</button>
+        <button id="prompt-modal-save">Save and Restart Simulation</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

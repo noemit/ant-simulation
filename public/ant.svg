@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12" width="24" height="12">
+  <!-- soft glow so ants are visible on dark backgrounds -->
+  <ellipse cx="12" cy="6" rx="11" ry="6" fill="rgba(255,255,255,0.12)" />
+  <!-- abdomen -->
+  <ellipse cx="6" cy="6" rx="5" ry="3.5" fill="#e8e8e8" />
+  <!-- thorax -->
+  <ellipse cx="14" cy="6" rx="3.5" ry="2.5" fill="#f5f5f5" />
+  <!-- head -->
+  <ellipse cx="20" cy="6" rx="2.8" ry="2.2" fill="#e8e8e8" />
+  <!-- mandibles -->
+  <path d="M22 6 Q24 4 25 5 M22 6 Q24 8 25 7" stroke="#ccc" stroke-width="0.8" fill="none" />
+  <!-- antennae -->
+  <path d="M21 4 Q23 2 25 1 M21 8 Q23 10 25 11" stroke="#aaa" stroke-width="0.6" fill="none" />
+  <!-- legs -->
+  <path d="M12 4 Q13 1 15 0 M12 6 Q13 6 16 6 M12 8 Q13 11 15 12" stroke="#bbb" stroke-width="0.9" fill="none" />
+  <path d="M8 4 Q7 1 5 0 M8 6 Q7 6 4 6 M8 8 Q7 11 5 12" stroke="#bbb" stroke-width="0.9" fill="none" />
+</svg>
