@@ -1,6 +1,16 @@
 import { Renderer } from './client/Renderer';
 import { WebGPUDiffusion } from './client/WebGPUDiffusion';
-import { LLM_CHEMICALS, type Ant, type SimulationState } from './engine/types';
+import { World } from './engine/World';
+import { MockOrchestrator } from './engine/MockOrchestrator';
+import { buildAntPayload, setActiveChemicals } from './engine/payload';
+import { systemPrompt as defaultSystemPrompt } from './server/llm/PromptBuilder';
+import {
+  LLM_CHEMICALS,
+  type Ant,
+  type AntTarget,
+  type SimulationState,
+  type WorldConfig,
+} from './engine/types';
 
 const canvas = document.getElementById('sim') as HTMLCanvasElement;
 const statsEl = document.getElementById('stats') as HTMLElement;
@@ -29,17 +39,34 @@ const modalNearestFood = document.getElementById('ant-modal-nearest-food') as HT
 const modalTrail = document.getElementById('ant-modal-trail') as HTMLCanvasElement;
 const trailTooltip = document.getElementById('trail-tooltip') as HTMLDivElement;
 
-let state: SimulationState | null = null;
-let previousState: SimulationState | null = null;
-let lastStateTime = 0;
-const SERVER_TICK_MS = 50;
+const SIMULATION_HZ = 20;
+const DT = 1 / SIMULATION_HZ;
+const LLM_DECISION_INTERVAL_MS = 500;
+
+const config: WorldConfig = {
+  width: 600,
+  height: 400,
+  gridWidth: 600,
+  gridHeight: 400,
+  antCount: 40,
+  diffusionRate: 0.15,
+  evaporationRate: 0.02,
+  energyCostFactor: 0.08,
+  maxSpeed: 5,
+  minSpeed: 0.5,
+  startingEnergy: 100,
+  antRadius: 3,
+  foodCount: 6,
+  hazardCount: 2,
+  gapCount: 2,
+};
+
 let renderer: Renderer | null = null;
 let diffusion: WebGPUDiffusion | null = null;
 let webgpuReady = false;
-let serverFallbackImage: HTMLImageElement | null = null;
-let useSnapshot = true;
+let useSnapshot = false;
 
-let currentSystemPrompt = '';
+let currentSystemPrompt = defaultSystemPrompt;
 let currentActiveSenses: string[] = [...LLM_CHEMICALS];
 
 // Per-ant movement history for the modal trail (last 120 ticks).
@@ -51,12 +78,6 @@ let lastProcessedTick = -1;
 let modalAntId: string | null = null;
 let lastTrailPins: { x: number; y: number; direction: string; tick: number }[] = [];
 
-const wsUrl = import.meta.env.DEV
-  ? 'ws://localhost:3000'
-  : `ws://${window.location.host}`;
-
-const ws = new WebSocket(wsUrl);
-
 function log(msg: string): void {
   console.log(`[ant-sim] ${msg}`);
 }
@@ -65,204 +86,106 @@ function updateStatus(msg: string): void {
   statsEl.innerHTML = msg;
 }
 
-ws.addEventListener('open', () => {
-  log('Connected to simulation server');
-  updateStatus('Connected. Waiting for world state...');
-  renderer?.setStatus('Connected. Waiting for world state...');
-  restartBtn.disabled = false;
-  snapshotToggle.disabled = false;
-  editPromptBtn.disabled = false;
-});
+class BrowserSimulation {
+  world: World;
+  private mock = new MockOrchestrator();
+  private latestTargets = new Map<string, AntTarget>();
+  private llmInFlight = false;
+  private lastLLMCallAt = 0;
+  systemPrompt: string;
+  activeSenses: string[];
 
-restartBtn.addEventListener('click', () => {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'restart' }));
-    log('Restart requested');
-  }
-});
-
-ws.addEventListener('message', (event) => {
-  const message = JSON.parse(event.data);
-
-  if (message.type === 'init') {
-    state = message.state as SimulationState;
-    log(`Init: ${state.ants.length} ants, ${state.gaps.length} gaps`);
-
-    // Wipe the GPU chemical field and history when the server starts or restarts a world.
-    diffusion?.clear();
-    antHistory.clear();
-    antDecisions.clear();
-    lastTargetDirection.clear();
-    lastProcessedTick = -1;
-    closeAntModal();
-
-    if (typeof message.prompt === 'string') {
-      currentSystemPrompt = message.prompt;
-    }
-    if (Array.isArray(message.activeSenses)) {
-      currentActiveSenses = message.activeSenses;
-    }
-
-    if (message.chemicals) {
-      loadSnapshot(message.chemicals);
-    }
-
-    initRenderer();
-    renderer?.setStatus('Waiting for first LLM tick...');
-  } else if (message.type === 'tick') {
-    previousState = state;
-    state = message.state as SimulationState;
-    lastStateTime = performance.now();
-    renderer?.setStatus('Running');
-  } else if (message.type === 'chemicals') {
-    loadSnapshot(message.chemicals);
-  }
-});
-
-ws.addEventListener('close', () => {
-  log('Disconnected from simulation server');
-  updateStatus('Disconnected from server.');
-  renderer?.setStatus('Disconnected from server');
-  restartBtn.disabled = true;
-  snapshotToggle.disabled = true;
-  editPromptBtn.disabled = true;
-});
-
-ws.addEventListener('error', (err) => {
-  console.error('[ant-sim] WebSocket error:', err);
-  updateStatus('WebSocket error. Is the server running?');
-  renderer?.setStatus('WebSocket error — is the server running?');
-  restartBtn.disabled = true;
-  snapshotToggle.disabled = true;
-  editPromptBtn.disabled = true;
-});
-
-function loadSnapshot(src: string): void {
-  serverFallbackImage = new Image();
-  serverFallbackImage.src = src;
-  serverFallbackImage.onload = () => {
-    renderer?.setChemicalImage(serverFallbackImage!);
-    if (useSnapshot) {
-      renderer?.setPreferSnapshot(true);
-    }
-  };
-}
-
-function updateChemicalSource(): void {
-  if (useSnapshot) {
-    renderer?.setChemicalSource('server snapshot');
-  } else if (webgpuReady) {
-    renderer?.setChemicalSource('WebGPU + snapshot');
-  } else {
-    renderer?.setChemicalSource('server snapshot');
-  }
-}
-
-function setUseSnapshot(value: boolean): void {
-  useSnapshot = value;
-  snapshotToggle.textContent = useSnapshot ? 'Using snapshot' : 'Use snapshot';
-  snapshotToggle.style.background = useSnapshot
-    ? 'rgba(0, 255, 136, 0.25)'
-    : 'rgba(20, 20, 20, 0.8)';
-  renderer?.setPreferSnapshot(useSnapshot);
-  updateChemicalSource();
-}
-
-function initRenderer(): void {
-  if (renderer) return;
-
-  renderer = new Renderer(canvas, antImage, statsEl);
-  if (serverFallbackImage && serverFallbackImage.complete) {
-    renderer.setChemicalImage(serverFallbackImage);
+  constructor(systemPrompt: string, activeSenses: string[]) {
+    this.systemPrompt = systemPrompt;
+    this.activeSenses = activeSenses;
+    setActiveChemicals(activeSenses);
+    this.world = new World(config);
   }
 
-  snapshotToggle.addEventListener('click', () => {
-    setUseSnapshot(!useSnapshot);
-  });
-
-  canvas.addEventListener('mousemove', (e) => {
-    if (!renderer) return;
-    const world = renderer.screenToWorld(e.clientX, e.clientY);
-    renderer.setMousePos(world.x, world.y);
-  });
-
-  canvas.addEventListener('mouseleave', () => {
-    renderer?.setMousePos(-1, -1);
-  });
-
-  canvas.addEventListener('click', () => {
-    if (!renderer || !state) return;
-    const ant = renderer.getHoveredAnt(state);
-    if (ant) {
-      openAntModal(ant);
+  restart(systemPrompt?: string, activeSenses?: string[]): void {
+    if (systemPrompt !== undefined) this.systemPrompt = systemPrompt;
+    if (activeSenses !== undefined) {
+      this.activeSenses = activeSenses;
+      setActiveChemicals(activeSenses);
     }
-  });
+    this.world = new World(config);
+    this.latestTargets.clear();
+    this.lastLLMCallAt = 0;
+    this.llmInFlight = false;
+  }
 
-  modalClose.addEventListener('click', closeAntModal);
-  modalBackdrop.addEventListener('click', closeAntModal);
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      closeAntModal();
-      closePromptModal();
-    }
-  });
+  async maybeFetchDecisions(): Promise<void> {
+    const now = performance.now();
+    if (this.llmInFlight || now - this.lastLLMCallAt < LLM_DECISION_INTERVAL_MS) return;
 
-  editPromptBtn.addEventListener('click', openPromptModal);
-  promptModalClose.addEventListener('click', closePromptModal);
-  promptModalCancel.addEventListener('click', closePromptModal);
-  promptModalSave.addEventListener('click', savePromptModal);
+    this.llmInFlight = true;
+    this.lastLLMCallAt = now;
 
-  modalTrail.addEventListener('mousemove', (e) => {
-    const rect = modalTrail.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const hitRadius = 8;
-    let hit: { x: number; y: number; direction: string; tick: number } | null = null;
-    for (const pin of lastTrailPins) {
-      const dx = pin.x - mx;
-      const dy = pin.y - my;
-      if (dx * dx + dy * dy <= hitRadius * hitRadius) {
-        hit = pin;
-        break;
+    const ants = this.world.ants.map((ant) => ({
+      ant_id: ant.id,
+      payload: buildAntPayload(ant, this.world),
+    }));
+
+    try {
+      const res = await fetch('/api/decide', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ systemPrompt: this.systemPrompt, ants }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`LLM proxy returned ${res.status}: ${text}`);
       }
+      const data = await res.json();
+      this.latestTargets.clear();
+      for (const d of data.decisions) {
+        this.latestTargets.set(d.antId, d.target);
+      }
+      renderer?.setStatus('Running (LLM)');
+    } catch (err) {
+      console.error('LLM fetch failed, using mock fallback', err);
+      renderer?.setStatus('Running (mock fallback)');
+      this.latestTargets.clear();
+      for (const ant of this.world.ants) {
+        this.latestTargets.set(ant.id, this.mock.decide(ant, this.world));
+      }
+    } finally {
+      this.llmInFlight = false;
     }
-    if (hit) {
-      trailTooltip.style.display = 'block';
-      trailTooltip.textContent = `LLM said ${hit.direction} @ tick ${hit.tick}`;
-      trailTooltip.style.left = `${modalTrail.offsetLeft + mx + 10}px`;
-      trailTooltip.style.top = `${modalTrail.offsetTop + my - 20}px`;
-    } else {
-      trailTooltip.style.display = 'none';
-    }
-  });
+  }
 
-  modalTrail.addEventListener('mouseleave', () => {
-    trailTooltip.style.display = 'none';
-  });
+  tick(dt: number): void {
+    this.world.tick(dt, (ant) => this.latestTargets.get(ant.id) ?? this.mock.decide(ant, this.world));
+  }
 
-  initDiffusion();
-  requestAnimationFrame(loop);
+  getState(): SimulationState {
+    return {
+      config: this.world.config,
+      ants: this.world.ants,
+      foods: this.world.foods,
+      hazards: this.world.hazards,
+      gaps: this.world.gaps,
+      nestX: this.world.nestX,
+      nestY: this.world.nestY,
+      tick: this.world.tickCount,
+    };
+  }
 }
 
-async function initDiffusion(): Promise<void> {
-  diffusion = new WebGPUDiffusion();
-  const ok = await diffusion.init();
-  if (ok && diffusion.getCanvas()) {
-    webgpuReady = true;
-    renderer?.setChemicalCanvas(diffusion.getCanvas()!);
-    log('WebGPU diffusion ready (1500x1000)');
-  } else {
-    diffusion = null;
-    webgpuReady = false;
-    log('WebGPU not available; using server snapshots');
-    updateStatus('WebGPU unavailable. Using server snapshots.');
-  }
-  // Default to the proven-visible server snapshot overlay.
-  setUseSnapshot(useSnapshot);
+let sim: BrowserSimulation;
+
+function resetHistory(): void {
+  antHistory.clear();
+  antDecisions.clear();
+  lastTargetDirection.clear();
+  lastProcessedTick = -1;
+  closeAntModal();
+  diffusion?.clear();
 }
 
 function updateHistory(): void {
-  if (!state || state.tick === lastProcessedTick) return;
+  const state = sim.getState();
+  if (state.tick === lastProcessedTick) return;
   lastProcessedTick = state.tick;
 
   for (const ant of state.ants) {
@@ -319,8 +242,7 @@ function renderTrail(ant: Ant): void {
   ctx.fillStyle = '#080808';
   ctx.fillRect(0, 0, w, h);
 
-  if (!state) return;
-
+  const state = sim.getState();
   const history = antHistory.get(ant.id) || [];
   if (history.length < 2) {
     ctx.fillStyle = '#00ff88';
@@ -329,7 +251,6 @@ function renderTrail(ant: Ant): void {
     return;
   }
 
-  // Determine bounds with padding around the trail and key landmarks.
   let minX = state.nestX;
   let maxX = state.nestX;
   let minY = state.nestY;
@@ -359,7 +280,6 @@ function renderTrail(ant: Ant): void {
   const tx = (x: number) => x * scale + offX;
   const ty = (y: number) => y * scale + offY;
 
-  // Trail.
   ctx.strokeStyle = '#00ff88';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -370,13 +290,11 @@ function renderTrail(ant: Ant): void {
   }
   ctx.stroke();
 
-  // Nest.
   ctx.fillStyle = '#2a73ff';
   ctx.beginPath();
   ctx.arc(tx(state.nestX), ty(state.nestY), 5, 0, Math.PI * 2);
   ctx.fill();
 
-  // Foods.
   for (const food of state.foods) {
     ctx.fillStyle = '#fff23a';
     ctx.beginPath();
@@ -384,13 +302,11 @@ function renderTrail(ant: Ant): void {
     ctx.fill();
   }
 
-  // Current ant position.
   ctx.fillStyle = '#ff5724';
   ctx.beginPath();
   ctx.arc(tx(ant.x), ty(ant.y), 5, 0, Math.PI * 2);
   ctx.fill();
 
-  // Decision pins: mark where the ant received a new direction command.
   const directionColor: Record<string, string> = {
     forward: '#ffffff',
     'forward left': '#aaffaa',
@@ -469,20 +385,17 @@ function savePromptModal(): void {
   const activeSenses = Array.from(senseCheckboxes)
     .filter((cb) => cb.checked)
     .map((cb) => cb.value);
-  ws.send(
-    JSON.stringify({
-      type: 'updateConfig',
-      systemPrompt: promptEditor.value,
-      activeSenses,
-    })
-  );
+  currentSystemPrompt = promptEditor.value;
+  currentActiveSenses = activeSenses;
+  sim.restart(currentSystemPrompt, currentActiveSenses);
+  resetHistory();
   closePromptModal();
   log('Updated system prompt and restarted');
 }
 
 function refreshModal(): void {
-  if (!modalAntId || !state) return;
-  const ant = state.ants.find((a) => a.id === modalAntId);
+  if (!modalAntId) return;
+  const ant = sim.getState().ants.find((a) => a.id === modalAntId);
   if (!ant) {
     closeAntModal();
     return;
@@ -491,39 +404,186 @@ function refreshModal(): void {
   renderTrail(ant);
 }
 
+function updateChemicalSource(): void {
+  if (useSnapshot) {
+    renderer?.setChemicalSource('server snapshot');
+  } else if (webgpuReady) {
+    renderer?.setChemicalSource('WebGPU');
+  } else {
+    renderer?.setChemicalSource('none');
+  }
+}
+
+function setUseSnapshot(value: boolean): void {
+  useSnapshot = value;
+  snapshotToggle.textContent = useSnapshot ? 'Using snapshot' : 'Use snapshot';
+  snapshotToggle.style.background = useSnapshot
+    ? 'rgba(0, 255, 136, 0.25)'
+    : 'rgba(20, 20, 20, 0.8)';
+  renderer?.setPreferSnapshot(useSnapshot);
+  updateChemicalSource();
+}
+
+async function initDiffusion(): Promise<void> {
+  diffusion = new WebGPUDiffusion();
+  const ok = await diffusion.init();
+  if (ok && diffusion.getCanvas()) {
+    webgpuReady = true;
+    renderer?.setChemicalCanvas(diffusion.getCanvas()!);
+    log('WebGPU diffusion ready');
+  } else {
+    diffusion = null;
+    webgpuReady = false;
+    log('WebGPU not available');
+  }
+  setUseSnapshot(false);
+}
+
+function initRenderer(): void {
+  if (renderer) return;
+
+  renderer = new Renderer(canvas, antImage, statsEl);
+
+  restartBtn.addEventListener('click', () => {
+    sim.restart();
+    resetHistory();
+    log('Restarted');
+  });
+
+  snapshotToggle.addEventListener('click', () => {
+    setUseSnapshot(!useSnapshot);
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!renderer) return;
+    const world = renderer.screenToWorld(e.clientX, e.clientY);
+    renderer.setMousePos(world.x, world.y);
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    renderer?.setMousePos(-1, -1);
+  });
+
+  canvas.addEventListener('click', () => {
+    if (!renderer) return;
+    const ant = renderer.getHoveredAnt(sim.getState());
+    if (ant) {
+      openAntModal(ant);
+    }
+  });
+
+  modalClose.addEventListener('click', closeAntModal);
+  modalBackdrop.addEventListener('click', closeAntModal);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeAntModal();
+      closePromptModal();
+    }
+  });
+
+  editPromptBtn.addEventListener('click', openPromptModal);
+  promptModalClose.addEventListener('click', closePromptModal);
+  promptModalCancel.addEventListener('click', closePromptModal);
+  promptModalSave.addEventListener('click', savePromptModal);
+
+  modalTrail.addEventListener('mousemove', (e) => {
+    const rect = modalTrail.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const hitRadius = 8;
+    let hit: { x: number; y: number; direction: string; tick: number } | null = null;
+    for (const pin of lastTrailPins) {
+      const dx = pin.x - mx;
+      const dy = pin.y - my;
+      if (dx * dx + dy * dy <= hitRadius * hitRadius) {
+        hit = pin;
+        break;
+      }
+    }
+    if (hit) {
+      trailTooltip.style.display = 'block';
+      trailTooltip.textContent = `LLM said ${hit.direction} @ tick ${hit.tick}`;
+      trailTooltip.style.left = `${modalTrail.offsetLeft + mx + 10}px`;
+      trailTooltip.style.top = `${modalTrail.offsetTop + my - 20}px`;
+    } else {
+      trailTooltip.style.display = 'none';
+    }
+  });
+
+  modalTrail.addEventListener('mouseleave', () => {
+    trailTooltip.style.display = 'none';
+  });
+
+  initDiffusion();
+}
+
+let lastFrameTime = performance.now();
+let accumulator = 0;
 let frameCount = 0;
 let gpuErrorCount = 0;
-function loop() {
-  if (state && renderer) {
-    try {
-      updateHistory();
+let previousState: SimulationState | null = null;
 
-      // Only run the GPU diffusion path when the user explicitly wants it.
-      if (diffusion && !useSnapshot) {
-        diffusion.depositAnts(state.ants, state.config.width, state.config.height);
-        diffusion.step();
-      }
-      const alpha = Math.min(1, (performance.now() - lastStateTime) / SERVER_TICK_MS);
-      renderer.render(state, previousState ?? undefined, alpha);
-      refreshModal();
-      gpuErrorCount = 0;
+function loop(now: number): void {
+  const elapsed = (now - lastFrameTime) / 1000;
+  lastFrameTime = now;
+  accumulator += elapsed;
 
-      frameCount++;
-      if (frameCount % 120 === 0) {
-        log(
-          `tick=${state.tick} ants=${state.ants.length} carrying=${state.ants.filter((a) => a.carryingFood).length} webgpu=${webgpuReady}`
-        );
-      }
-    } catch (err) {
-      console.error('[ant-sim] render loop error:', err);
-      if (diffusion && err instanceof Error && /gpu|webgpu|writebuffer/i.test(err.message)) {
-        gpuErrorCount++;
-        if (gpuErrorCount > 3) {
-          log('WebGPU is failing; switching back to server snapshot.');
-          setUseSnapshot(true);
-        }
+  // Fire LLM decision request asynchronously (physics never waits for it).
+  sim.maybeFetchDecisions();
+
+  while (accumulator >= DT) {
+    previousState = sim.getState();
+    sim.tick(DT);
+    updateHistory();
+    accumulator -= DT;
+  }
+
+  const alpha = accumulator / DT;
+  const state = sim.getState();
+
+  try {
+    if (diffusion && !useSnapshot) {
+      diffusion.depositAnts(state.ants, state.config.width, state.config.height);
+      diffusion.step();
+    }
+
+    renderer?.render(state, previousState ?? undefined, alpha);
+    refreshModal();
+    gpuErrorCount = 0;
+
+    frameCount++;
+    if (frameCount % 120 === 0) {
+      log(
+        `tick=${state.tick} ants=${state.ants.length} carrying=${state.ants.filter((a) => a.carryingFood).length} webgpu=${webgpuReady}`
+      );
+    }
+  } catch (err) {
+    console.error('[ant-sim] render loop error:', err);
+    if (diffusion && err instanceof Error && /gpu|webgpu|writebuffer/i.test(err.message)) {
+      gpuErrorCount++;
+      if (gpuErrorCount > 3) {
+        log('WebGPU is failing; disabling overlay.');
+        setUseSnapshot(true);
       }
     }
   }
+
   requestAnimationFrame(loop);
 }
+
+async function bootstrap(): Promise<void> {
+  sim = new BrowserSimulation(currentSystemPrompt, currentActiveSenses);
+  initRenderer();
+  restartBtn.disabled = false;
+  snapshotToggle.disabled = false;
+  editPromptBtn.disabled = false;
+  renderer?.setStatus('Waiting for first LLM tick...');
+  updateStatus('Ready');
+  lastFrameTime = performance.now();
+  requestAnimationFrame(loop);
+}
+
+bootstrap().catch((err) => {
+  console.error('[ant-sim] bootstrap failed:', err);
+  updateStatus('Bootstrap failed');
+});
