@@ -1,5 +1,5 @@
 import { Renderer } from './client/Renderer';
-import { WebGPUDiffusion } from './client/WebGPUDiffusion';
+import { ChemicalRenderer } from './client/ChemicalRenderer';
 import { World } from './engine/World';
 import { MockOrchestrator } from './engine/MockOrchestrator';
 import { buildAntPayload, setActiveChemicals } from './engine/payload';
@@ -62,9 +62,7 @@ const config: WorldConfig = {
 };
 
 let renderer: Renderer | null = null;
-let diffusion: WebGPUDiffusion | null = null;
-let webgpuReady = false;
-let useSnapshot = false;
+let chemicalRenderer: ChemicalRenderer | null = null;
 
 let currentSystemPrompt = defaultSystemPrompt;
 let currentActiveSenses: string[] = [...LLM_CHEMICALS];
@@ -180,7 +178,6 @@ function resetHistory(): void {
   lastTargetDirection.clear();
   lastProcessedTick = -1;
   closeAntModal();
-  diffusion?.clear();
 }
 
 function updateHistory(): void {
@@ -405,38 +402,16 @@ function refreshModal(): void {
 }
 
 function updateChemicalSource(): void {
-  if (useSnapshot) {
-    renderer?.setChemicalSource('server snapshot');
-  } else if (webgpuReady) {
-    renderer?.setChemicalSource('WebGPU');
-  } else {
-    renderer?.setChemicalSource('none');
-  }
+  renderer?.setChemicalSource(chemicalRenderer ? 'World chemical layers' : 'none');
 }
 
-function setUseSnapshot(value: boolean): void {
-  useSnapshot = value;
-  snapshotToggle.textContent = useSnapshot ? 'Using snapshot' : 'Use snapshot';
-  snapshotToggle.style.background = useSnapshot
-    ? 'rgba(0, 255, 136, 0.25)'
-    : 'rgba(20, 20, 20, 0.8)';
-  renderer?.setPreferSnapshot(useSnapshot);
+function initChemicalRenderer(): void {
+  chemicalRenderer = new ChemicalRenderer(sim.world);
+  renderer?.setChemicalCanvas(chemicalRenderer.canvas);
+  renderer?.setPreferSnapshot(false);
   updateChemicalSource();
-}
-
-async function initDiffusion(): Promise<void> {
-  diffusion = new WebGPUDiffusion();
-  const ok = await diffusion.init();
-  if (ok && diffusion.getCanvas()) {
-    webgpuReady = true;
-    renderer?.setChemicalCanvas(diffusion.getCanvas()!);
-    log('WebGPU diffusion ready');
-  } else {
-    diffusion = null;
-    webgpuReady = false;
-    log('WebGPU not available');
-  }
-  setUseSnapshot(false);
+  // The snapshot toggle was for the old server PNG overlay; hide it.
+  snapshotToggle.style.display = 'none';
 }
 
 function initRenderer(): void {
@@ -448,10 +423,6 @@ function initRenderer(): void {
     sim.restart();
     resetHistory();
     log('Restarted');
-  });
-
-  snapshotToggle.addEventListener('click', () => {
-    setUseSnapshot(!useSnapshot);
   });
 
   canvas.addEventListener('mousemove', (e) => {
@@ -514,13 +485,12 @@ function initRenderer(): void {
     trailTooltip.style.display = 'none';
   });
 
-  initDiffusion();
+  initChemicalRenderer();
 }
 
 let lastFrameTime = performance.now();
 let accumulator = 0;
 let frameCount = 0;
-let gpuErrorCount = 0;
 let previousState: SimulationState | null = null;
 
 function loop(now: number): void {
@@ -542,30 +512,18 @@ function loop(now: number): void {
   const state = sim.getState();
 
   try {
-    if (diffusion && !useSnapshot) {
-      diffusion.depositAnts(state.ants, state.config.width, state.config.height);
-      diffusion.step();
-    }
-
+    chemicalRenderer?.render(sim.world);
     renderer?.render(state, previousState ?? undefined, alpha);
     refreshModal();
-    gpuErrorCount = 0;
 
     frameCount++;
     if (frameCount % 120 === 0) {
       log(
-        `tick=${state.tick} ants=${state.ants.length} carrying=${state.ants.filter((a) => a.carryingFood).length} webgpu=${webgpuReady}`
+        `tick=${state.tick} ants=${state.ants.length} carrying=${state.ants.filter((a) => a.carryingFood).length}`
       );
     }
   } catch (err) {
     console.error('[ant-sim] render loop error:', err);
-    if (diffusion && err instanceof Error && /gpu|webgpu|writebuffer/i.test(err.message)) {
-      gpuErrorCount++;
-      if (gpuErrorCount > 3) {
-        log('WebGPU is failing; disabling overlay.');
-        setUseSnapshot(true);
-      }
-    }
   }
 
   requestAnimationFrame(loop);
@@ -575,7 +533,6 @@ async function bootstrap(): Promise<void> {
   sim = new BrowserSimulation(currentSystemPrompt, currentActiveSenses);
   initRenderer();
   restartBtn.disabled = false;
-  snapshotToggle.disabled = false;
   editPromptBtn.disabled = false;
   renderer?.setStatus('Waiting for first LLM tick...');
   updateStatus('Ready');
